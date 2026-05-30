@@ -1,10 +1,17 @@
 use thrust_macros::service;
 
 #[service]
-pub struct UserService;
+pub struct UserRepository;
 
 #[service]
-pub struct EmailService;
+pub struct UserService {
+    pub repo: UserRepository,
+}
+
+#[service]
+pub struct EmailService {
+    pub repo: UserRepository,
+}
 
 impl UserService {
     pub fn hello(&self) -> &str {
