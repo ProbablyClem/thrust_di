@@ -60,6 +60,7 @@ thrust/
 ## How It Works
 
 1. Developer writes an annotated struct:
+
    ```rust
    use thrust_macros::service;
 
@@ -72,11 +73,13 @@ thrust/
 3. `build.rs` walks every `.rs` file under `src/` with `walkdir`, parses each with `syn::parse_file`, and collects the names of all structs that carry a `#[service]` attribute.
 
 4. `quote!` renders the collected names into a Rust constant and writes it to `$OUT_DIR/generated.rs`:
+
    ```rust
    pub const GENERATED_COMPONENTS: &[&str] = &["UserService", "EmailService"];
    ```
 
 5. `main.rs` includes the generated file at compile time:
+
    ```rust
    include!(concat!(env!("OUT_DIR"), "/generated.rs"));
    ```
@@ -97,22 +100,22 @@ cargo run -p thrust-core
 
 ## Roadmap
 
-| Phase | Status | Description |
-|-------|--------|-------------|
-| 1 | ✓ done | Component discovery — scan `#[service]` structs, emit names |
-| 2 | planned | Dependency extraction — parse struct fields to find injected types |
-| 3 | planned | Dependency graph construction |
-| 4 | planned | Missing dependency validation |
-| 5 | planned | Cycle detection |
-| 6 | planned | Topological ordering |
-| 7 | planned | Generate container struct |
-| 8 | planned | Generate constructor / build logic |
-| 9 | planned | Compile generated container (end-to-end DI working) |
-| later | — | Route discovery, router generation, controller adapters |
-| later | — | Configuration binding (`#[configuration]`, `#[property]`) |
-| later | — | Bean factories (`#[bean] async fn`) |
-| later | — | Test container with mock substitution |
-| later | — | `#[transactional]`, `#[scheduled]`, `#[retry]` via code gen |
+| Phase | Status  | Description                                                        |
+| ----- | ------- | ------------------------------------------------------------------ |
+| 1     | ✓ done  | Component discovery — scan `#[service]` structs, emit names        |
+| 2     | done    | Dependency extraction — parse struct fields to find injected types |
+| 3     | done    | Dependency graph construction                                      |
+| 4     | done    | Missing dependency validation                                      |
+| 5     | done    | Cycle detection                                                    |
+| 6     | done    | Topological ordering                                               |
+| 7     | planned | Generate container struct                                          |
+| 8     | planned | Generate constructor / build logic                                 |
+| 9     | planned | Compile generated container (end-to-end DI working)                |
+| later | —       | Route discovery, router generation, controller adapters            |
+| later | —       | Configuration binding (`#[configuration]`, `#[property]`)          |
+| later | —       | Bean factories (`#[bean] async fn`)                                |
+| later | —       | Test container with mock substitution                              |
+| later | —       | `#[transactional]`, `#[scheduled]`, `#[retry]` via code gen        |
 
 ---
 

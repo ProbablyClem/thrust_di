@@ -1,10 +1,10 @@
-use quote::quote;
+use quote::{format_ident, quote};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     env, fs,
     path::Path,
 };
-use syn::{Fields, Item, Type, parse_file};
+use syn::{Fields, GenericArgument, Item, PathArguments, Type, parse_file};
 use walkdir::WalkDir;
 
 struct ComponentInfo {
@@ -50,7 +50,8 @@ fn main() {
                         .iter()
                         .filter_map(|f| {
                             let field_name = f.ident.as_ref()?.to_string();
-                            let type_name = type_to_string(&f.ty);
+                            // Unwrap Arc<T> → T for component resolution
+                            let type_name = unwrap_arc(&f.ty);
                             Some((field_name, type_name))
                         })
                         .collect(),
@@ -87,23 +88,71 @@ fn main() {
     // Phase 6: topological sort → construction order (deps before dependents)
     let order = topological_sort(&adjacency, &components);
 
-    // Emit generated.rs
-    let metadata_items = components.iter().map(|c| {
-        let name = &c.name;
-        let dep_entries = c.deps.iter().map(|(field, ty)| {
-            quote! { Dependency { field: #field, ty: #ty } }
-        });
-        quote! {
-            ComponentMetadata { name: #name, dependencies: &[#(#dep_entries),*] }
-        }
-    });
+    // Phase 2: full metadata (field name + type)
+    let metadata_items: Vec<_> = components
+        .iter()
+        .map(|c| {
+            let name = &c.name;
+            let dep_entries = c.deps.iter().map(|(field, ty)| {
+                quote! { Dependency { field: #field, ty: #ty } }
+            });
+            quote! {
+                ComponentMetadata { name: #name, dependencies: &[#(#dep_entries),*] }
+            }
+        })
+        .collect();
 
-    let graph_nodes = order.iter().map(|&name| {
-        let edges = &adjacency[name];
-        quote! {
-            GraphNode { name: #name, depends_on: &[#(#edges),*] }
-        }
-    });
+    // Phase 3: adjacency graph in topological order
+    let graph_nodes: Vec<_> = order
+        .iter()
+        .map(|&name| {
+            let edges = &adjacency[name];
+            quote! { GraphNode { name: #name, depends_on: &[#(#edges),*] } }
+        })
+        .collect();
+
+    // Phase 7: Container struct fields (Arc<T> per component, in topo order)
+    let container_fields: Vec<_> = order
+        .iter()
+        .map(|&name| {
+            let field = format_ident!("{}", to_snake_case(name));
+            let ty = format_ident!("{}", name);
+            quote! { pub #field: ::std::sync::Arc<#ty> }
+        })
+        .collect();
+
+    // Phase 8: Container::build() — construct in topo order, clone Arcs for deps
+    let build_stmts: Vec<_> = order
+        .iter()
+        .map(|&name| {
+            let var = format_ident!("{}", to_snake_case(name));
+            let ty = format_ident!("{}", name);
+            let c = components.iter().find(|c| c.name == name).unwrap();
+
+            if c.deps.is_empty() {
+                quote! { let #var = ::std::sync::Arc::new(#ty); }
+            } else {
+                let field_inits: Vec<_> = c
+                    .deps
+                    .iter()
+                    .map(|(field, dep_ty)| {
+                        let f = format_ident!("{}", field);
+                        let dep_var = format_ident!("{}", to_snake_case(dep_ty));
+                        quote! { #f: #dep_var.clone() }
+                    })
+                    .collect();
+                quote! { let #var = ::std::sync::Arc::new(#ty { #(#field_inits),* }); }
+            }
+        })
+        .collect();
+
+    let self_fields: Vec<_> = order
+        .iter()
+        .map(|&name| {
+            let f = format_ident!("{}", to_snake_case(name));
+            quote! { #f }
+        })
+        .collect();
 
     let generated = quote! {
         pub struct Dependency {
@@ -124,6 +173,17 @@ fn main() {
         pub const GENERATED_COMPONENTS: &[ComponentMetadata] = &[#(#metadata_items),*];
 
         pub const DEPENDENCY_GRAPH: &[GraphNode] = &[#(#graph_nodes),*];
+
+        pub struct Container {
+            #(#container_fields),*
+        }
+
+        impl Container {
+            pub fn build() -> Self {
+                #(#build_stmts)*
+                Self { #(#self_fields),* }
+            }
+        }
     };
 
     let out_dir = env::var("OUT_DIR").unwrap();
@@ -198,7 +258,6 @@ fn topological_sort<'a>(
     adjacency: &HashMap<&'a str, Vec<&'a str>>,
     components: &'a [ComponentInfo],
 ) -> Vec<&'a str> {
-    // reverse: dep -> [nodes that depend on dep]
     let mut reverse: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut in_degree: HashMap<&str, usize> =
         components.iter().map(|c| (c.name.as_str(), 0)).collect();
@@ -232,6 +291,33 @@ fn topological_sort<'a>(
     }
 
     result
+}
+
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+    for (i, ch) in s.char_indices() {
+        if ch.is_uppercase() && i > 0 {
+            result.push('_');
+        }
+        result.push(ch.to_ascii_lowercase());
+    }
+    result
+}
+
+// Strip Arc<T> → T so the framework resolves the component, not the wrapper
+fn unwrap_arc(ty: &Type) -> String {
+    if let Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            if seg.ident == "Arc" {
+                if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                    if let Some(GenericArgument::Type(inner)) = args.args.first() {
+                        return type_to_string(inner);
+                    }
+                }
+            }
+        }
+    }
+    type_to_string(ty)
 }
 
 fn type_to_string(ty: &Type) -> String {

@@ -1,5 +1,7 @@
 mod services;
 
+use services::*;
+
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 
 fn main() {
@@ -14,7 +16,7 @@ fn main() {
         }
     }
 
-    println!("\n=== dependency graph ===");
+    println!("\n=== dependency graph (construction order) ===");
     for node in DEPENDENCY_GRAPH {
         if node.depends_on.is_empty() {
             println!("  {} -> []", node.name);
@@ -22,4 +24,9 @@ fn main() {
             println!("  {} -> [{}]", node.name, node.depends_on.join(", "));
         }
     }
+
+    println!("\n=== container ===");
+    let container = Container::build();
+    println!("  user_repository ptr: {:p}", container.user_repository);
+    println!("  user_service.hello(): {}", container.user_service.hello());
 }
