@@ -3,6 +3,22 @@
 version = 4
 
 [[package]]
+name = "example-basic"
+version = "0.1.0"
+dependencies = [
+ "thrust-build",
+ "thrust-macros",
+]
+
+[[package]]
+name = "example-inspect"
+version = "0.1.0"
+dependencies = [
+ "thrust-build",
+ "thrust-macros",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -41,14 +57,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "thrust-core"
+name = "thrust-build"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn",
- "thrust-macros",
  "walkdir",
+]
+
+[[package]]
+name = "thrust-core"
+version = "0.1.0"
+dependencies = [
+ "thrust-build",
+ "thrust-macros",
 ]
 
 [[package]]

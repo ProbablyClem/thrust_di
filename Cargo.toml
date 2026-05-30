@@ -1,6 +1,8 @@
 [workspace]
 members = [
+    "thrust-build",
     "thrust-core",
     "thrust-macros",
+    "examples/*",
 ]
 resolver = "2"

@@ -7,7 +7,4 @@ edition = "2024"
 thrust-macros = { path = "../thrust-macros" }
 
 [build-dependencies]
-syn = { version = "2", features = ["full"] }
-quote = "1"
-proc-macro2 = "1"
-walkdir = "2"
+thrust-build = { path = "../thrust-build" }
