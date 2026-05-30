@@ -1,11 +1,11 @@
 use quote::quote;
-use std::{env, fs, path::Path};
+use std::{collections::HashMap, env, fs, path::Path};
 use syn::{Fields, Item, Type, parse_file};
 use walkdir::WalkDir;
 
 struct ComponentInfo {
     name: String,
-    deps: Vec<(String, String)>,
+    deps: Vec<(String, String)>, // (field_name, type_name)
 }
 
 fn main() {
@@ -58,6 +58,24 @@ fn main() {
         }
     }
 
+    // Phase 3: build adjacency map (name -> dep type names)
+    let known: HashMap<&str, &ComponentInfo> =
+        components.iter().map(|c| (c.name.as_str(), c)).collect();
+
+    let graph_nodes = components.iter().map(|c| {
+        let name = &c.name;
+        let edges: Vec<&str> = c
+            .deps
+            .iter()
+            .map(|(_, ty)| ty.as_str())
+            .filter(|ty| known.contains_key(ty))
+            .collect();
+        quote! {
+            GraphNode { name: #name, depends_on: &[#(#edges),*] }
+        }
+    });
+
+    // Phase 2: full metadata (field name + type)
     let metadata_items = components.iter().map(|c| {
         let name = &c.name;
         let dep_entries = c.deps.iter().map(|(field, ty)| {
@@ -82,7 +100,14 @@ fn main() {
             pub dependencies: &'static [Dependency],
         }
 
+        pub struct GraphNode {
+            pub name: &'static str,
+            pub depends_on: &'static [&'static str],
+        }
+
         pub const GENERATED_COMPONENTS: &[ComponentMetadata] = &[#(#metadata_items),*];
+
+        pub const DEPENDENCY_GRAPH: &[GraphNode] = &[#(#graph_nodes),*];
     };
 
     let out_dir = env::var("OUT_DIR").unwrap();
