@@ -154,7 +154,10 @@ fn main() {
         })
         .collect();
 
-    let generated = quote! {
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let out = Path::new(&out_dir);
+
+    let metadata = quote! {
         pub struct Dependency {
             pub field: &'static str,
             pub ty: &'static str,
@@ -165,15 +168,19 @@ fn main() {
             pub dependencies: &'static [Dependency],
         }
 
+        pub const GENERATED_COMPONENTS: &[ComponentMetadata] = &[#(#metadata_items),*];
+    };
+
+    let graph = quote! {
         pub struct GraphNode {
             pub name: &'static str,
             pub depends_on: &'static [&'static str],
         }
 
-        pub const GENERATED_COMPONENTS: &[ComponentMetadata] = &[#(#metadata_items),*];
-
         pub const DEPENDENCY_GRAPH: &[GraphNode] = &[#(#graph_nodes),*];
+    };
 
+    let container = quote! {
         pub struct Container {
             #(#container_fields),*
         }
@@ -186,9 +193,17 @@ fn main() {
         }
     };
 
-    let out_dir = env::var("OUT_DIR").unwrap();
-    let dest = Path::new(&out_dir).join("generated.rs");
-    fs::write(dest, generated.to_string()).unwrap();
+    fs::write(out.join("metadata.rs"), metadata.to_string()).unwrap();
+    fs::write(out.join("graph.rs"), graph.to_string()).unwrap();
+    fs::write(out.join("container.rs"), container.to_string()).unwrap();
+    fs::write(
+        out.join("generated.rs"),
+        r#"include!(concat!(env!("OUT_DIR"), "/metadata.rs"));
+include!(concat!(env!("OUT_DIR"), "/graph.rs"));
+include!(concat!(env!("OUT_DIR"), "/container.rs"));
+"#,
+    )
+    .unwrap();
 }
 
 // Phase 4: abort if any field type is not a registered component

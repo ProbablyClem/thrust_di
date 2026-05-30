@@ -7,3 +7,10 @@ pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
     out.extend(item);
     out
 }
+
+#[proc_macro]
+pub fn init(_: TokenStream) -> TokenStream {
+    r#"include!(concat!(env!("OUT_DIR"), "/generated.rs"));"#
+        .parse()
+        .unwrap()
+}

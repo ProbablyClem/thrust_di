@@ -2,7 +2,7 @@ mod services;
 
 use services::*;
 
-include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+thrust_macros::init!();
 
 fn main() {
     println!("=== components ===");
