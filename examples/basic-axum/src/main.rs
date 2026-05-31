@@ -29,21 +29,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_users_exists() {
+    async fn get_todos_exists() {
         let res = app()
-            .oneshot(Request::builder().uri("/users").body(Body::empty()).unwrap())
+            .oneshot(Request::builder().uri("/todos").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
     }
 
     #[tokio::test]
-    async fn post_users_exists() {
+    async fn post_todos_exists() {
         let res = app()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/users")
+                    .uri("/todos")
                     .body(Body::empty())
                     .unwrap(),
             )

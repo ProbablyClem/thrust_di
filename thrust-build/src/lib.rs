@@ -4,7 +4,7 @@ use std::{
     fs,
     path::Path,
 };
-use syn::{Fields, GenericArgument, Item, PathArguments, Type, parse_file};
+use syn::{FnArg, Fields, GenericArgument, Item, PathArguments, Type, parse_file};
 use walkdir::WalkDir;
 
 struct ComponentInfo {
@@ -12,8 +12,27 @@ struct ComponentInfo {
     deps: Vec<(String, String)>, // (field_name, type_name)
 }
 
+struct RawRouteInfo {
+    fn_name: String,
+    method: String,
+    path: String,
+    module_path: String,
+    arc_params: Vec<String>,
+}
+
+struct RouteInfo {
+    fn_name: String,
+    method: String,
+    path: String,
+    module_path: String,
+    service_params: Vec<String>,
+}
+
+const HTTP_METHODS: &[&str] = &["get", "post", "put", "delete", "patch"];
+
 pub fn scan_and_generate(src_dir: &Path, out_dir: &Path) {
     let mut components: Vec<ComponentInfo> = Vec::new();
+    let mut raw_routes: Vec<RawRouteInfo> = Vec::new();
 
     for entry in WalkDir::new(src_dir)
         .into_iter()
@@ -28,6 +47,8 @@ pub fn scan_and_generate(src_dir: &Path, out_dir: &Path) {
             Ok(ast) => ast,
             Err(_) => continue,
         };
+
+        let module_path = derive_module_path(entry.path(), src_dir);
 
         for item in &ast.items {
             if let Item::Struct(s) = item {
@@ -54,6 +75,53 @@ pub fn scan_and_generate(src_dir: &Path, out_dir: &Path) {
 
                 components.push(ComponentInfo { name, deps });
             }
+
+            if let Item::Fn(f) = item {
+                for attr in &f.attrs {
+                    let method = attr
+                        .path()
+                        .get_ident()
+                        .map(|id| id.to_string())
+                        .filter(|m| HTTP_METHODS.contains(&m.as_str()));
+                    let Some(method) = method else { continue };
+
+                    let fn_name = f.sig.ident.to_string();
+
+                    if f.sig.asyncness.is_none() {
+                        panic!("thrust: `#[{method}]` on `{fn_name}` must be async");
+                    }
+
+                    let path = attr
+                        .parse_args::<syn::LitStr>()
+                        .unwrap_or_else(|_| {
+                            panic!(
+                                "thrust: `#[{method}]` on `{fn_name}` requires a string literal path"
+                            )
+                        })
+                        .value();
+
+                    let arc_params = f
+                        .sig
+                        .inputs
+                        .iter()
+                        .filter_map(|arg| {
+                            if let FnArg::Typed(pt) = arg {
+                                try_unwrap_arc(&pt.ty)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    raw_routes.push(RawRouteInfo {
+                        fn_name,
+                        method,
+                        path,
+                        module_path: module_path.clone(),
+                        arc_params,
+                    });
+                }
+            }
         }
     }
 
@@ -77,6 +145,24 @@ pub fn scan_and_generate(src_dir: &Path, out_dir: &Path) {
     detect_cycles(&adjacency, &components);
 
     let order = topological_sort(&adjacency, &components);
+
+    validate_routes(&raw_routes, &known);
+
+    let routes: Vec<RouteInfo> = raw_routes
+        .into_iter()
+        .map(|r| RouteInfo {
+            service_params: r
+                .arc_params
+                .iter()
+                .filter(|ty| known.contains(ty.as_str()))
+                .cloned()
+                .collect(),
+            fn_name: r.fn_name,
+            method: r.method,
+            path: r.path,
+            module_path: r.module_path,
+        })
+        .collect();
 
     let metadata_items: Vec<_> = components
         .iter()
@@ -175,14 +261,101 @@ pub fn scan_and_generate(src_dir: &Path, out_dir: &Path) {
     fs::write(out_dir.join("metadata.rs"), metadata.to_string()).unwrap();
     fs::write(out_dir.join("graph.rs"), graph.to_string()).unwrap();
     fs::write(out_dir.join("container.rs"), container.to_string()).unwrap();
-    fs::write(
-        out_dir.join("generated.rs"),
-        r#"include!(concat!(env!("OUT_DIR"), "/metadata.rs"));
-include!(concat!(env!("OUT_DIR"), "/graph.rs"));
-include!(concat!(env!("OUT_DIR"), "/container.rs"));
-"#,
-    )
-    .unwrap();
+
+    let mut generated = String::from(concat!(
+        "include!(concat!(env!(\"OUT_DIR\"), \"/metadata.rs\"));\n",
+        "include!(concat!(env!(\"OUT_DIR\"), \"/graph.rs\"));\n",
+        "include!(concat!(env!(\"OUT_DIR\"), \"/container.rs\"));\n",
+    ));
+
+    if !routes.is_empty() {
+        let router_ts = generate_router(&routes);
+        fs::write(out_dir.join("router.rs"), router_ts.to_string()).unwrap();
+        generated.push_str("include!(concat!(env!(\"OUT_DIR\"), \"/router.rs\"));\n");
+    }
+
+    fs::write(out_dir.join("generated.rs"), generated).unwrap();
+}
+
+fn derive_module_path(file_path: &Path, src_dir: &Path) -> String {
+    let rel = file_path.strip_prefix(src_dir).unwrap_or(file_path);
+    let without_ext = rel.with_extension("");
+    let parts: Vec<_> = without_ext
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let joined = parts.join("::");
+    if joined == "main" {
+        String::new()
+    } else {
+        format!("crate::{joined}")
+    }
+}
+
+fn generate_router(routes: &[RouteInfo]) -> proc_macro2::TokenStream {
+    let wrappers: Vec<_> = routes
+        .iter()
+        .map(|r| {
+            let wrapper = format_ident!("__thrust_{}", r.fn_name);
+            let user_fn_name = format_ident!("{}", r.fn_name);
+
+            let (state_binding, param_clones) = if r.service_params.is_empty() {
+                (
+                    quote! { ::axum::extract::State(_c): ::axum::extract::State<::std::sync::Arc<Container>> },
+                    vec![],
+                )
+            } else {
+                let clones: Vec<_> = r
+                    .service_params
+                    .iter()
+                    .map(|ty| {
+                        let field = format_ident!("{}", to_snake_case(ty));
+                        quote! { c.#field.clone() }
+                    })
+                    .collect();
+                (
+                    quote! { ::axum::extract::State(c): ::axum::extract::State<::std::sync::Arc<Container>> },
+                    clones,
+                )
+            };
+
+            let call = if r.module_path.is_empty() {
+                quote! { #user_fn_name(#(#param_clones),*).await }
+            } else {
+                let mod_tokens: proc_macro2::TokenStream =
+                    r.module_path.parse().expect("valid module path");
+                quote! { #mod_tokens :: #user_fn_name(#(#param_clones),*).await }
+            };
+
+            quote! {
+                async fn #wrapper(
+                    #state_binding
+                ) -> impl ::axum::response::IntoResponse {
+                    #call
+                }
+            }
+        })
+        .collect();
+
+    let route_calls: Vec<_> = routes
+        .iter()
+        .map(|r| {
+            let path = &r.path;
+            let method = format_ident!("{}", r.method);
+            let wrapper = format_ident!("__thrust_{}", r.fn_name);
+            quote! { .route(#path, ::axum::routing::#method(#wrapper)) }
+        })
+        .collect();
+
+    quote! {
+        #(#wrappers)*
+
+        pub fn build_router(container: ::std::sync::Arc<Container>) -> ::axum::Router {
+            ::axum::Router::new()
+                #(#route_calls)*
+                .with_state(container)
+        }
+    }
 }
 
 fn validate_deps(components: &[ComponentInfo], known: &HashSet<&str>) {
@@ -202,6 +375,37 @@ fn validate_deps(components: &[ComponentInfo], known: &HashSet<&str>) {
             eprintln!("thrust error: {e}");
         }
         panic!("thrust: unresolved dependencies");
+    }
+}
+
+fn validate_routes(raw: &[RawRouteInfo], known: &HashSet<&str>) {
+    let mut errors: Vec<String> = Vec::new();
+    let mut seen: HashSet<(&str, &str)> = HashSet::new();
+
+    for r in raw {
+        for ty in &r.arc_params {
+            if !known.contains(ty.as_str()) {
+                errors.push(format!(
+                    "handler `{}` has Arc<{}> parameter but `{}` is not a @service component",
+                    r.fn_name, ty, ty
+                ));
+            }
+        }
+        let key = (r.path.as_str(), r.method.as_str());
+        if !seen.insert(key) {
+            errors.push(format!(
+                "duplicate route `{} {}` — only one handler per method+path is allowed",
+                r.method.to_uppercase(),
+                r.path
+            ));
+        }
+    }
+
+    if !errors.is_empty() {
+        for e in &errors {
+            eprintln!("thrust error: {e}");
+        }
+        panic!("thrust: invalid routes");
     }
 }
 
@@ -276,19 +480,23 @@ fn topological_sort<'a>(
     result
 }
 
-fn unwrap_arc(ty: &Type) -> String {
+fn try_unwrap_arc(ty: &Type) -> Option<String> {
     if let Type::Path(tp) = ty {
         if let Some(seg) = tp.path.segments.last() {
             if seg.ident == "Arc" {
                 if let PathArguments::AngleBracketed(args) = &seg.arguments {
                     if let Some(GenericArgument::Type(inner)) = args.args.first() {
-                        return type_to_string(inner);
+                        return Some(type_to_string(inner));
                     }
                 }
             }
         }
     }
-    type_to_string(ty)
+    None
+}
+
+fn unwrap_arc(ty: &Type) -> String {
+    try_unwrap_arc(ty).unwrap_or_else(|| type_to_string(ty))
 }
 
 fn to_snake_case(s: &str) -> String {

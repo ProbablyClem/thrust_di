@@ -1,17 +1,16 @@
 [package]
-name = "thrust-core"
+name = "basic-axum"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-thrust-macros = { path = "../thrust-macros" }
+thrust-macros = { path = "../../thrust-macros" }
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 
 [build-dependencies]
-thrust-build = { path = "../thrust-build" }
+thrust-build = { path = "../../thrust-build" }
