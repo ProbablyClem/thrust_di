@@ -37,6 +37,16 @@ pub fn patch(_attr: TokenStream, item: TokenStream) -> TokenStream {
     no_op_attr(item)
 }
 
+#[proc_macro_attribute]
+pub fn bean(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    no_op_attr(item)
+}
+
+#[proc_macro_attribute]
+pub fn layer(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    no_op_attr(item)
+}
+
 #[proc_macro]
 pub fn init(_: TokenStream) -> TokenStream {
     r#"include!(concat!(env!("OUT_DIR"), "/generated.rs"));"#

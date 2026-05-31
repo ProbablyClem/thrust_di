@@ -4,12 +4,25 @@ use std::{
     fs,
     path::Path,
 };
-use syn::{FnArg, Fields, GenericArgument, Item, PathArguments, Type, parse_file};
+use syn::{FnArg, Fields, GenericArgument, Item, PathArguments, ReturnType, Type, parse_file};
 use walkdir::WalkDir;
 
 struct ComponentInfo {
     name: String,
     deps: Vec<(String, String)>, // (field_name, type_name)
+}
+
+struct BeanInfo {
+    name: String,       // return type name, unwrapped from Arc<T>
+    fn_name: String,
+    is_async: bool,
+    deps: Vec<String>,  // dep type names (unwrapped Arc<T> from params)
+    module_path: String,
+}
+
+struct LayerInfo {
+    fn_name: String,
+    module_path: String,
 }
 
 struct RawRouteInfo {
@@ -32,6 +45,8 @@ const HTTP_METHODS: &[&str] = &["get", "post", "put", "delete", "patch"];
 
 pub fn scan_and_generate(src_dir: &Path, out_dir: &Path) {
     let mut components: Vec<ComponentInfo> = Vec::new();
+    let mut beans: Vec<BeanInfo> = Vec::new();
+    let mut layers: Vec<LayerInfo> = Vec::new();
     let mut raw_routes: Vec<RawRouteInfo> = Vec::new();
 
     for entry in WalkDir::new(src_dir)
@@ -51,85 +66,143 @@ pub fn scan_and_generate(src_dir: &Path, out_dir: &Path) {
         let module_path = derive_module_path(entry.path(), src_dir);
 
         for item in &ast.items {
-            if let Item::Struct(s) = item {
-                let has_service = s.attrs.iter().any(|attr| {
-                    attr.path().get_ident().map_or(false, |id| id == "service")
-                });
-                if !has_service {
-                    continue;
-                }
-
-                let name = s.ident.to_string();
-                let deps = match &s.fields {
-                    Fields::Named(named) => named
-                        .named
-                        .iter()
-                        .filter_map(|f| {
-                            let field_name = f.ident.as_ref()?.to_string();
-                            let type_name = unwrap_arc(&f.ty);
-                            Some((field_name, type_name))
-                        })
-                        .collect(),
-                    _ => vec![],
-                };
-
-                components.push(ComponentInfo { name, deps });
-            }
-
-            if let Item::Fn(f) = item {
-                for attr in &f.attrs {
-                    let method = attr
-                        .path()
-                        .get_ident()
-                        .map(|id| id.to_string())
-                        .filter(|m| HTTP_METHODS.contains(&m.as_str()));
-                    let Some(method) = method else { continue };
-
-                    let fn_name = f.sig.ident.to_string();
-
-                    if f.sig.asyncness.is_none() {
-                        panic!("thrust: `#[{method}]` on `{fn_name}` must be async");
+            match item {
+                Item::Struct(s) => {
+                    let has_service = s.attrs.iter().any(|a| {
+                        a.path().get_ident().map_or(false, |id| id == "service")
+                    });
+                    if !has_service {
+                        continue;
                     }
 
-                    let path = attr
-                        .parse_args::<syn::LitStr>()
-                        .unwrap_or_else(|_| {
-                            panic!(
-                                "thrust: `#[{method}]` on `{fn_name}` requires a string literal path"
-                            )
-                        })
-                        .value();
-
-                    let arc_params = f
-                        .sig
-                        .inputs
-                        .iter()
-                        .filter_map(|arg| {
-                            if let FnArg::Typed(pt) = arg {
-                                try_unwrap_arc(&pt.ty)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-
-                    raw_routes.push(RawRouteInfo {
-                        fn_name,
-                        method,
-                        path,
-                        module_path: module_path.clone(),
-                        arc_params,
-                    });
+                    let name = s.ident.to_string();
+                    let deps = match &s.fields {
+                        Fields::Named(named) => named
+                            .named
+                            .iter()
+                            .filter_map(|f| {
+                                let field_name = f.ident.as_ref()?.to_string();
+                                let type_name = unwrap_arc(&f.ty);
+                                Some((field_name, type_name))
+                            })
+                            .collect(),
+                        _ => vec![],
+                    };
+                    components.push(ComponentInfo { name, deps });
                 }
+
+                Item::Fn(f) => {
+                    let has_bean = f.attrs.iter().any(|a| {
+                        a.path().get_ident().map_or(false, |id| id == "bean")
+                    });
+                    let has_layer = f.attrs.iter().any(|a| {
+                        a.path().get_ident().map_or(false, |id| id == "layer")
+                    });
+
+                    if has_bean {
+                        let fn_name = f.sig.ident.to_string();
+                        let is_async = f.sig.asyncness.is_some();
+
+                        let name = match &f.sig.output {
+                            ReturnType::Type(_, ty) => try_unwrap_arc(ty),
+                            ReturnType::Default => None,
+                        }
+                        .unwrap_or_else(|| {
+                            panic!("thrust: `#[bean]` function `{fn_name}` must return `Arc<T>`")
+                        });
+
+                        let deps: Vec<String> = f
+                            .sig
+                            .inputs
+                            .iter()
+                            .filter_map(|arg| {
+                                if let FnArg::Typed(pt) = arg {
+                                    try_unwrap_arc(&pt.ty)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+
+                        beans.push(BeanInfo {
+                            name,
+                            fn_name,
+                            is_async,
+                            deps,
+                            module_path: module_path.clone(),
+                        });
+                        continue;
+                    }
+
+                    if has_layer {
+                        layers.push(LayerInfo {
+                            fn_name: f.sig.ident.to_string(),
+                            module_path: module_path.clone(),
+                        });
+                        continue;
+                    }
+
+                    for attr in &f.attrs {
+                        let method = attr
+                            .path()
+                            .get_ident()
+                            .map(|id| id.to_string())
+                            .filter(|m| HTTP_METHODS.contains(&m.as_str()));
+                        let Some(method) = method else { continue };
+
+                        let fn_name = f.sig.ident.to_string();
+
+                        if f.sig.asyncness.is_none() {
+                            panic!("thrust: `#[{method}]` on `{fn_name}` must be async");
+                        }
+
+                        let path = attr
+                            .parse_args::<syn::LitStr>()
+                            .unwrap_or_else(|_| {
+                                panic!(
+                                    "thrust: `#[{method}]` on `{fn_name}` requires a string literal path"
+                                )
+                            })
+                            .value();
+
+                        let arc_params = f
+                            .sig
+                            .inputs
+                            .iter()
+                            .filter_map(|arg| {
+                                if let FnArg::Typed(pt) = arg {
+                                    try_unwrap_arc(&pt.ty)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+
+                        raw_routes.push(RawRouteInfo {
+                            fn_name,
+                            method,
+                            path,
+                            module_path: module_path.clone(),
+                            arc_params,
+                        });
+                    }
+                }
+
+                _ => {}
             }
         }
     }
 
-    let known: HashSet<&str> = components.iter().map(|c| c.name.as_str()).collect();
+    // Unified known set: services + beans
+    let known: HashSet<&str> = components
+        .iter()
+        .map(|c| c.name.as_str())
+        .chain(beans.iter().map(|b| b.name.as_str()))
+        .collect();
 
-    validate_deps(&components, &known);
+    validate_service_deps(&components, &known);
 
-    let adjacency: HashMap<&str, Vec<&str>> = components
+    let mut adjacency: HashMap<&str, Vec<&str>> = components
         .iter()
         .map(|c| {
             let edges: Vec<&str> = c
@@ -142,9 +215,24 @@ pub fn scan_and_generate(src_dir: &Path, out_dir: &Path) {
         })
         .collect();
 
-    detect_cycles(&adjacency, &components);
+    for b in &beans {
+        let edges: Vec<&str> = b
+            .deps
+            .iter()
+            .filter(|d| known.contains(d.as_str()))
+            .map(|d| d.as_str())
+            .collect();
+        adjacency.insert(b.name.as_str(), edges);
+    }
 
-    let order = topological_sort(&adjacency, &components);
+    let all_names: Vec<&str> = components
+        .iter()
+        .map(|c| c.name.as_str())
+        .chain(beans.iter().map(|b| b.name.as_str()))
+        .collect();
+
+    detect_cycles(&adjacency, &all_names);
+    let order = topological_sort(&adjacency, &all_names);
 
     validate_routes(&raw_routes, &known);
 
@@ -164,6 +252,12 @@ pub fn scan_and_generate(src_dir: &Path, out_dir: &Path) {
         })
         .collect();
 
+    let component_map: HashMap<&str, &ComponentInfo> =
+        components.iter().map(|c| (c.name.as_str(), c)).collect();
+    let bean_map: HashMap<&str, &BeanInfo> =
+        beans.iter().map(|b| (b.name.as_str(), b)).collect();
+
+    // --- metadata.rs ---
     let metadata_items: Vec<_> = components
         .iter()
         .map(|c| {
@@ -174,55 +268,6 @@ pub fn scan_and_generate(src_dir: &Path, out_dir: &Path) {
             quote! {
                 ComponentMetadata { name: #name, dependencies: &[#(#dep_entries),*] }
             }
-        })
-        .collect();
-
-    let graph_nodes: Vec<_> = order
-        .iter()
-        .map(|&name| {
-            let edges = &adjacency[name];
-            quote! { GraphNode { name: #name, depends_on: &[#(#edges),*] } }
-        })
-        .collect();
-
-    let container_fields: Vec<_> = order
-        .iter()
-        .map(|&name| {
-            let field = format_ident!("{}", to_snake_case(name));
-            let ty = format_ident!("{}", name);
-            quote! { pub #field: ::std::sync::Arc<#ty> }
-        })
-        .collect();
-
-    let build_stmts: Vec<_> = order
-        .iter()
-        .map(|&name| {
-            let var = format_ident!("{}", to_snake_case(name));
-            let ty = format_ident!("{}", name);
-            let c = components.iter().find(|c| c.name == name).unwrap();
-
-            if c.deps.is_empty() {
-                quote! { let #var = ::std::sync::Arc::new(#ty); }
-            } else {
-                let field_inits: Vec<_> = c
-                    .deps
-                    .iter()
-                    .map(|(field, dep_ty)| {
-                        let f = format_ident!("{}", field);
-                        let dep_var = format_ident!("{}", to_snake_case(dep_ty));
-                        quote! { #f: #dep_var.clone() }
-                    })
-                    .collect();
-                quote! { let #var = ::std::sync::Arc::new(#ty { #(#field_inits),* }); }
-            }
-        })
-        .collect();
-
-    let self_fields: Vec<_> = order
-        .iter()
-        .map(|&name| {
-            let f = format_ident!("{}", to_snake_case(name));
-            quote! { #f }
         })
         .collect();
 
@@ -238,6 +283,15 @@ pub fn scan_and_generate(src_dir: &Path, out_dir: &Path) {
         pub const GENERATED_COMPONENTS: &[ComponentMetadata] = &[#(#metadata_items),*];
     };
 
+    // --- graph.rs ---
+    let graph_nodes: Vec<_> = order
+        .iter()
+        .map(|&name| {
+            let edges = &adjacency[name];
+            quote! { GraphNode { name: #name, depends_on: &[#(#edges),*] } }
+        })
+        .collect();
+
     let graph = quote! {
         pub struct GraphNode {
             pub name: &'static str,
@@ -246,14 +300,102 @@ pub fn scan_and_generate(src_dir: &Path, out_dir: &Path) {
         pub const DEPENDENCY_GRAPH: &[GraphNode] = &[#(#graph_nodes),*];
     };
 
-    let container = quote! {
-        pub struct Container {
-            #(#container_fields),*
+    // --- container.rs ---
+    let container_fields: Vec<_> = order
+        .iter()
+        .map(|&name| {
+            let field = format_ident!("{}", to_snake_case(name));
+            let ty = format_ident!("{}", name);
+            quote! { pub #field: ::std::sync::Arc<#ty> }
+        })
+        .collect();
+
+    let build_stmts: Vec<_> = order
+        .iter()
+        .map(|&name| {
+            let var = format_ident!("{}", to_snake_case(name));
+            let ty = format_ident!("{}", name);
+
+            if let Some(c) = component_map.get(name) {
+                // Service: struct instantiation
+                if c.deps.is_empty() {
+                    quote! { let #var = ::std::sync::Arc::new(#ty); }
+                } else {
+                    let field_inits: Vec<_> = c
+                        .deps
+                        .iter()
+                        .map(|(field, dep_ty)| {
+                            let f = format_ident!("{}", field);
+                            let dep_var = format_ident!("{}", to_snake_case(dep_ty));
+                            quote! { #f: #dep_var.clone() }
+                        })
+                        .collect();
+                    quote! { let #var = ::std::sync::Arc::new(#ty { #(#field_inits),* }); }
+                }
+            } else if let Some(b) = bean_map.get(name) {
+                // Bean: free function call (already returns Arc<T>)
+                let fn_name = format_ident!("{}", b.fn_name);
+
+                let dep_args: Vec<_> = b
+                    .deps
+                    .iter()
+                    .map(|dep_ty| {
+                        let dep_var = format_ident!("{}", to_snake_case(dep_ty));
+                        quote! { #dep_var.clone() }
+                    })
+                    .collect();
+
+                let call = if b.module_path.is_empty() {
+                    quote! { #fn_name(#(#dep_args),*) }
+                } else {
+                    let mod_tokens: proc_macro2::TokenStream =
+                        b.module_path.parse().expect("valid module path");
+                    quote! { #mod_tokens::#fn_name(#(#dep_args),*) }
+                };
+
+                if b.is_async {
+                    quote! { let #var = #call.await; }
+                } else {
+                    quote! { let #var = #call; }
+                }
+            } else {
+                panic!("thrust: unknown component `{name}` in topological order");
+            }
+        })
+        .collect();
+
+    let self_fields: Vec<_> = order
+        .iter()
+        .map(|&name| {
+            let f = format_ident!("{}", to_snake_case(name));
+            quote! { #f }
+        })
+        .collect();
+
+    let has_async_bean = beans.iter().any(|b| b.is_async);
+
+    let container = if has_async_bean {
+        quote! {
+            pub struct Container {
+                #(#container_fields),*
+            }
+            impl Container {
+                pub async fn build() -> Self {
+                    #(#build_stmts)*
+                    Self { #(#self_fields),* }
+                }
+            }
         }
-        impl Container {
-            pub fn build() -> Self {
-                #(#build_stmts)*
-                Self { #(#self_fields),* }
+    } else {
+        quote! {
+            pub struct Container {
+                #(#container_fields),*
+            }
+            impl Container {
+                pub fn build() -> Self {
+                    #(#build_stmts)*
+                    Self { #(#self_fields),* }
+                }
             }
         }
     };
@@ -269,7 +411,7 @@ pub fn scan_and_generate(src_dir: &Path, out_dir: &Path) {
     ));
 
     if !routes.is_empty() {
-        let router_ts = generate_router(&routes);
+        let router_ts = generate_router(&routes, &layers, has_async_bean);
         fs::write(out_dir.join("router.rs"), router_ts.to_string()).unwrap();
         generated.push_str("include!(concat!(env!(\"OUT_DIR\"), \"/router.rs\"));\n");
     }
@@ -292,7 +434,11 @@ fn derive_module_path(file_path: &Path, src_dir: &Path) -> String {
     }
 }
 
-fn generate_router(routes: &[RouteInfo]) -> proc_macro2::TokenStream {
+fn generate_router(
+    routes: &[RouteInfo],
+    layers: &[LayerInfo],
+    has_async_bean: bool,
+) -> proc_macro2::TokenStream {
     let wrappers: Vec<_> = routes
         .iter()
         .map(|r| {
@@ -347,6 +493,27 @@ fn generate_router(routes: &[RouteInfo]) -> proc_macro2::TokenStream {
         })
         .collect();
 
+    let layer_calls: Vec<_> = layers
+        .iter()
+        .map(|l| {
+            let fn_name = format_ident!("{}", l.fn_name);
+            let call = if l.module_path.is_empty() {
+                quote! { #fn_name() }
+            } else {
+                let mod_tokens: proc_macro2::TokenStream =
+                    l.module_path.parse().expect("valid module path");
+                quote! { #mod_tokens::#fn_name() }
+            };
+            quote! { .layer(#call) }
+        })
+        .collect();
+
+    let build_call = if has_async_bean {
+        quote! { Container::build().await }
+    } else {
+        quote! { Container::build() }
+    };
+
     quote! {
         #(#wrappers)*
 
@@ -354,17 +521,34 @@ fn generate_router(routes: &[RouteInfo]) -> proc_macro2::TokenStream {
             ::axum::Router::new()
                 #(#route_calls)*
                 .with_state(container)
+                #(#layer_calls)*
+        }
+
+        pub async fn run() {
+            let container = ::std::sync::Arc::new(#build_call);
+            let port: u16 = ::std::env::var("PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(8080u16);
+            let addr = ::std::format!("0.0.0.0:{}", port);
+            let router = build_router(::std::sync::Arc::clone(&container));
+            let listener = ::tokio::net::TcpListener::bind(&addr)
+                .await
+                .expect("thrust: failed to bind server address");
+            ::axum::serve(listener, router)
+                .await
+                .expect("thrust: server error");
         }
     }
 }
 
-fn validate_deps(components: &[ComponentInfo], known: &HashSet<&str>) {
+fn validate_service_deps(components: &[ComponentInfo], known: &HashSet<&str>) {
     let mut errors: Vec<String> = Vec::new();
     for c in components {
         for (field, ty) in &c.deps {
             if !known.contains(ty.as_str()) {
                 errors.push(format!(
-                    "`{}::{}` depends on `{}`, which is not a @service component",
+                    "`{}::{}` depends on `{}`, which is not a @service or @bean component",
                     c.name, field, ty
                 ));
             }
@@ -386,7 +570,7 @@ fn validate_routes(raw: &[RawRouteInfo], known: &HashSet<&str>) {
         for ty in &r.arc_params {
             if !known.contains(ty.as_str()) {
                 errors.push(format!(
-                    "handler `{}` has Arc<{}> parameter but `{}` is not a @service component",
+                    "handler `{}` has Arc<{}> parameter but `{}` is not a @service or @bean component",
                     r.fn_name, ty, ty
                 ));
             }
@@ -409,12 +593,12 @@ fn validate_routes(raw: &[RawRouteInfo], known: &HashSet<&str>) {
     }
 }
 
-fn detect_cycles<'a>(adjacency: &HashMap<&'a str, Vec<&'a str>>, components: &'a [ComponentInfo]) {
+fn detect_cycles<'a>(adjacency: &HashMap<&'a str, Vec<&'a str>>, names: &[&'a str]) {
     let mut visited: HashSet<&str> = HashSet::new();
     let mut in_stack: HashSet<&str> = HashSet::new();
-    for c in components {
-        if !visited.contains(c.name.as_str()) {
-            if let Some(cycle) = dfs(c.name.as_str(), adjacency, &mut visited, &mut in_stack) {
+    for &name in names {
+        if !visited.contains(name) {
+            if let Some(cycle) = dfs(name, adjacency, &mut visited, &mut in_stack) {
                 panic!("thrust: dependency cycle detected: {}", cycle.join(" -> "));
             }
         }
@@ -448,11 +632,10 @@ fn dfs<'a>(
 
 fn topological_sort<'a>(
     adjacency: &HashMap<&'a str, Vec<&'a str>>,
-    components: &'a [ComponentInfo],
+    names: &[&'a str],
 ) -> Vec<&'a str> {
     let mut reverse: HashMap<&str, Vec<&str>> = HashMap::new();
-    let mut in_degree: HashMap<&str, usize> =
-        components.iter().map(|c| (c.name.as_str(), 0)).collect();
+    let mut in_degree: HashMap<&str, usize> = names.iter().map(|&n| (n, 0)).collect();
     for (&node, deps) in adjacency {
         for &dep in deps {
             reverse.entry(dep).or_default().push(node);
