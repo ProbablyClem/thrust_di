@@ -16,6 +16,11 @@ pub struct LayerInfo {
     pub module_path: String,
 }
 
+pub struct TraitImpl {
+    pub trait_name: String, // the implemented trait, e.g. `UserRepository`
+    pub concrete: String,   // the implementing type, e.g. `PostgresUserRepository`
+}
+
 pub struct RawRouteInfo {
     pub fn_name: String,
     pub method: String,

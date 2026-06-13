@@ -1,6 +1,61 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::models::{BeanInfo, ComponentInfo, RawRouteInfo, RouteInfo};
+use crate::models::{BeanInfo, ComponentInfo, RawRouteInfo, RouteInfo, TraitImpl};
+
+/// Rewrite trait-typed dependencies (`Arc<dyn Trait>`, recorded under the bare
+/// trait name) to the concrete component that implements the trait. This lets
+/// services depend on an abstraction while the container still instantiates a
+/// concrete type; the generated `Arc<Concrete>` coerces to `Arc<dyn Trait>` at
+/// the field/parameter site. A trait with more than one implementing component
+/// is ambiguous and aborts the build.
+pub fn resolve_trait_deps(
+    trait_impls: &[TraitImpl],
+    components: &mut [ComponentInfo],
+    beans: &mut [BeanInfo],
+    raw_routes: &mut [RawRouteInfo],
+) {
+    let mut impls: HashMap<&str, Vec<&str>> = HashMap::new();
+    for ti in trait_impls {
+        impls
+            .entry(ti.trait_name.as_str())
+            .or_default()
+            .push(ti.concrete.as_str());
+    }
+
+    let resolve = |ty: &str| -> Option<String> {
+        let concretes = impls.get(ty)?;
+        if concretes.len() > 1 {
+            panic!(
+                "thrust: trait `{ty}` is implemented by multiple components ({}); \
+                 cannot decide which to inject for `Arc<dyn {ty}>`",
+                concretes.join(", ")
+            );
+        }
+        Some(concretes[0].to_string())
+    };
+
+    for c in components.iter_mut() {
+        for (_, ty) in c.deps.iter_mut() {
+            if let Some(concrete) = resolve(ty) {
+                *ty = concrete;
+            }
+        }
+    }
+    for b in beans.iter_mut() {
+        for ty in b.deps.iter_mut() {
+            if let Some(concrete) = resolve(ty) {
+                *ty = concrete;
+            }
+        }
+    }
+    for r in raw_routes.iter_mut() {
+        for ty in r.arc_params.iter_mut() {
+            if let Some(concrete) = resolve(ty) {
+                *ty = concrete;
+            }
+        }
+    }
+}
 
 pub fn build_adjacency<'a>(
     components: &'a [ComponentInfo],

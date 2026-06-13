@@ -7,7 +7,10 @@ mod utils;
 use std::{collections::HashMap, fs, path::Path};
 
 pub fn scan_and_generate(src_dir: &Path, out_dir: &Path) {
-    let (components, beans, layers, raw_routes) = scanner::scan_source(src_dir);
+    let (mut components, mut beans, layers, mut raw_routes, trait_impls) =
+        scanner::scan_source(src_dir);
+
+    graph::resolve_trait_deps(&trait_impls, &mut components, &mut beans, &mut raw_routes);
 
     let known: std::collections::HashSet<&str> = components
         .iter()

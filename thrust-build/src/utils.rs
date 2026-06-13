@@ -1,5 +1,5 @@
 use std::path::Path;
-use syn::{GenericArgument, PathArguments, Type};
+use syn::{GenericArgument, PathArguments, Type, TypeParamBound};
 
 pub fn derive_module_path(file_path: &Path, src_dir: &Path) -> String {
     let rel = file_path.strip_prefix(src_dir).unwrap_or(file_path);
@@ -22,13 +22,29 @@ pub fn try_unwrap_arc(ty: &Type) -> Option<String> {
             if seg.ident == "Arc" {
                 if let PathArguments::AngleBracketed(args) = &seg.arguments {
                     if let Some(GenericArgument::Type(inner)) = args.args.first() {
-                        return Some(type_to_string(inner));
+                        return Some(type_to_dep_name(inner));
                     }
                 }
             }
         }
     }
     None
+}
+
+/// Name used to identify a dependency. For a trait object `dyn Trait + ...`,
+/// this is the bare trait name (`Trait`) so it can be resolved to the concrete
+/// `#[service]` that implements it. For any other type, it is the type itself.
+fn type_to_dep_name(ty: &Type) -> String {
+    if let Type::TraitObject(obj) = ty {
+        for bound in &obj.bounds {
+            if let TypeParamBound::Trait(tb) = bound {
+                if let Some(seg) = tb.path.segments.last() {
+                    return seg.ident.to_string();
+                }
+            }
+        }
+    }
+    type_to_string(ty)
 }
 
 pub fn unwrap_arc(ty: &Type) -> String {

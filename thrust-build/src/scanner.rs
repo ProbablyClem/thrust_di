@@ -2,8 +2,8 @@ use std::{fs, path::Path};
 use syn::{FnArg, Fields, Item, ReturnType, parse_file};
 use walkdir::WalkDir;
 
-use crate::models::{BeanInfo, ComponentInfo, LayerInfo, RawRouteInfo, HTTP_METHODS};
-use crate::utils::{derive_module_path, try_unwrap_arc, unwrap_arc};
+use crate::models::{BeanInfo, ComponentInfo, LayerInfo, RawRouteInfo, TraitImpl, HTTP_METHODS};
+use crate::utils::{derive_module_path, try_unwrap_arc, type_to_string, unwrap_arc};
 
 pub fn scan_source(
     src_dir: &Path,
@@ -12,11 +12,13 @@ pub fn scan_source(
     Vec<BeanInfo>,
     Vec<LayerInfo>,
     Vec<RawRouteInfo>,
+    Vec<TraitImpl>,
 ) {
     let mut components: Vec<ComponentInfo> = Vec::new();
     let mut beans: Vec<BeanInfo> = Vec::new();
     let mut layers: Vec<LayerInfo> = Vec::new();
     let mut raw_routes: Vec<RawRouteInfo> = Vec::new();
+    let mut trait_impls: Vec<TraitImpl> = Vec::new();
 
     for entry in WalkDir::new(src_dir)
         .into_iter()
@@ -37,6 +39,7 @@ pub fn scan_source(
         for item in &ast.items {
             match item {
                 Item::Struct(s) => collect_service(s, &mut components),
+                Item::Impl(i) => collect_impl(i, &mut trait_impls),
                 Item::Fn(f) => {
                     let _ = collect_bean(f, &module_path, &mut beans)
                         || collect_layer(f, &module_path, &mut layers)
@@ -47,7 +50,24 @@ pub fn scan_source(
         }
     }
 
-    (components, beans, layers, raw_routes)
+    (components, beans, layers, raw_routes, trait_impls)
+}
+
+/// Record `impl Trait for Concrete` blocks so trait-typed dependencies
+/// (`Arc<dyn Trait>`) can be resolved to the concrete component that
+/// implements them. Inherent impls (`impl Concrete { .. }`) are ignored.
+fn collect_impl(i: &syn::ItemImpl, trait_impls: &mut Vec<TraitImpl>) {
+    let Some((_, trait_path, _)) = &i.trait_ else {
+        return;
+    };
+    let Some(trait_name) = trait_path.segments.last().map(|s| s.ident.to_string()) else {
+        return;
+    };
+    let concrete = type_to_string(&i.self_ty);
+    trait_impls.push(TraitImpl {
+        trait_name,
+        concrete,
+    });
 }
 
 fn collect_service(s: &syn::ItemStruct, components: &mut Vec<ComponentInfo>) {

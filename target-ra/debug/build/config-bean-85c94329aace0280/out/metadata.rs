@@ -1,0 +1,1 @@
+pub struct Dependency { pub field : & 'static str , pub ty : & 'static str , } pub struct ComponentMetadata { pub name : & 'static str , pub dependencies : & 'static [Dependency] , } pub const GENERATED_COMPONENTS : & [ComponentMetadata] = & [ComponentMetadata { name : "UserService" , dependencies : & [Dependency { field : "pool" , ty : "DbPool" }] }] ;

@@ -1,0 +1,1 @@
+pub struct GraphNode { pub name : & 'static str , pub depends_on : & 'static [& 'static str] , } pub const DEPENDENCY_GRAPH : & [GraphNode] = & [GraphNode { name : "TodoRepository" , depends_on : & [] } , GraphNode { name : "TodoService" , depends_on : & ["TodoRepository"] }] ;

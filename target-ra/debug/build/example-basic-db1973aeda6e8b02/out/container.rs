@@ -1,0 +1,1 @@
+pub struct Container { pub greeting_service : :: std :: sync :: Arc < GreetingService > } impl Container { pub fn build () -> Self { let greeting_service = :: std :: sync :: Arc :: new (GreetingService) ; Self { greeting_service } } }
