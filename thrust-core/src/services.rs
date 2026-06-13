@@ -1,10 +1,10 @@
-use std::sync::Arc;
-use thrust_macros::service;
+use thrust_macros::{interface, service};
 
 /// Abstraction the services depend on, rather than a concrete repository.
-/// `Send + Sync` is required because the implementation is stored as
-/// `Arc<dyn UserRepository>` inside the (thread-shared) container.
-pub trait UserRepository: Send + Sync {
+/// `#[interface]` adds the `Send + Sync` bounds required to store the
+/// implementation as `Arc<dyn UserRepository>` in the shared container.
+#[interface]
+pub trait UserRepository {
     fn find_user(&self) -> String;
 }
 
@@ -19,12 +19,12 @@ impl UserRepository for PostgresUserRepository {
 
 #[service]
 pub struct UserService {
-    pub repo: Arc<dyn UserRepository>,
+    pub repo: dyn UserRepository,
 }
 
 #[service]
 pub struct EmailService {
-    pub repo: Arc<dyn UserRepository>,
+    pub repo: dyn UserRepository,
 }
 
 impl UserService {

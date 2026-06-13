@@ -48,7 +48,7 @@ fn type_to_dep_name(ty: &Type) -> String {
 }
 
 pub fn unwrap_arc(ty: &Type) -> String {
-    try_unwrap_arc(ty).unwrap_or_else(|| type_to_string(ty))
+    try_unwrap_arc(ty).unwrap_or_else(|| type_to_dep_name(ty))
 }
 
 pub fn to_snake_case(s: &str) -> String {
