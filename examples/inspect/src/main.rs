@@ -24,4 +24,9 @@ fn main() {
             println!("  {} -> [{}]", node.name, node.depends_on.join(", "));
         }
     }
+
+    println!("\n=== resolved instances (static dispatch) ===");
+    let container = Container::build();
+    println!("  {}", container.user_service.current_user());
+    println!("  {}", container.email_service.welcome_message());
 }
