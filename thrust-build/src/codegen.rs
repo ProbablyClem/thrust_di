@@ -54,18 +54,6 @@ pub fn generate_graph(
     }
 }
 
-/// Emit a type alias per resolved trait so the `#[service]` macro can rewrite a
-/// bare `dyn Trait` field into `Arc<crate::__ThrustImpl_<Trait>>` — a concrete
-/// type, statically dispatched. `used` holds `(trait_name, concrete)` pairs.
-pub fn generate_impl_aliases(used: &[(String, String)]) -> TokenStream {
-    let aliases = used.iter().map(|(trait_name, concrete)| {
-        let alias = format_ident!("__ThrustImpl_{}", trait_name);
-        let ty = format_ident!("{}", concrete);
-        quote! { #[allow(non_camel_case_types)] pub type #alias = #ty; }
-    });
-    quote! { #(#aliases)* }
-}
-
 pub fn generate_container(
     order: &[&str],
     component_map: &HashMap<&str, &ComponentInfo>,

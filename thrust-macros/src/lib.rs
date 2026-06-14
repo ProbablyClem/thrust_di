@@ -1,5 +1,5 @@
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
+use quote::quote;
 use syn::{parse_macro_input, parse_quote, Fields, ItemStruct, Type, TypeParamBound};
 
 fn no_op_attr(item: TokenStream) -> TokenStream {
@@ -11,12 +11,16 @@ fn no_op_attr(item: TokenStream) -> TokenStream {
 
 /// Marks a struct as an injectable component. Beyond the historical
 /// `#[allow(dead_code)]`, this rewrites a field written as a bare trait object
-/// (`dyn Trait`) into `Arc<crate::__ThrustImpl_<Trait>>` — a build-time type
-/// alias for the concrete `#[service]` that implements the trait. That gives the
-/// dependency static dispatch (no vtable) while keeping the dependency-inversion
-/// ergonomics in source. Fields written as explicit `Arc<dyn Trait>` keep the
-/// trait object (dynamic dispatch); concrete `Arc<T>` and other fields are left
-/// untouched.
+/// (`dyn Trait`) into `Arc<dyn Trait + Send + Sync>` — a trait object, always
+/// dynamically dispatched. This keeps the field a true abstraction in every
+/// build, so it behaves identically in production and tests and can be
+/// constructed with a mock (`Arc::new(MockRepo)`) in unit *and* integration
+/// tests.
+///
+/// `Send + Sync` is added at the use-site so the trait definition itself stays
+/// bound-free. Fields written as explicit `Arc<dyn Trait>` are already trait
+/// objects and left untouched (you supply the bounds); concrete `Arc<T>` and
+/// other fields are also left untouched.
 #[proc_macro_attribute]
 pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut item_struct = parse_macro_input!(item as ItemStruct);
@@ -25,8 +29,7 @@ pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
         for field in named.named.iter_mut() {
             if let Type::TraitObject(obj) = &field.ty {
                 if let Some(trait_ident) = first_trait_ident(obj) {
-                    let alias = format_ident!("__ThrustImpl_{}", trait_ident);
-                    field.ty = parse_quote!(::std::sync::Arc<crate::#alias>);
+                    field.ty = parse_quote!(::std::sync::Arc<dyn #trait_ident + Send + Sync>);
                 }
             }
         }
