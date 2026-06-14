@@ -2,17 +2,12 @@ mod controllers;
 mod services;
 
 use services::*;
-use std::sync::Arc;
 
 thrust_macros::init!();
 
 #[tokio::main]
 async fn main() {
-    let container = Arc::new(Container::build());
-    let app = build_router(container);
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    println!("listening on http://0.0.0.0:3000");
-    axum::serve(listener, app).await.unwrap();
+    run().await;
 }
 
 #[cfg(test)]
@@ -22,6 +17,7 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
+    use std::sync::Arc;
     use tower::ServiceExt;
 
     fn app() -> axum::Router {
