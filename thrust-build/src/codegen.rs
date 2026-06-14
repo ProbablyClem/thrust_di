@@ -161,11 +161,19 @@ fn build_stmt(
             let mod_tokens: TokenStream = b.module_path.parse().expect("valid module path");
             quote! { #mod_tokens::#fn_name(#(#dep_args),*) }
         };
-        return if b.is_async {
-            quote! { let #var = #call.await; }
+        let value = if b.is_async {
+            quote! { #call.await }
         } else {
-            quote! { let #var = #call; }
+            quote! { #call }
         };
+        // The container stores every component as `Arc<T>`. When the factory
+        // returns a bare `T`, thrust wraps it here so users don't have to.
+        let value = if b.returns_arc {
+            value
+        } else {
+            quote! { ::std::sync::Arc::new(#value) }
+        };
+        return quote! { let #var = #value; };
     }
 
     panic!("thrust: unknown component `{name}` in topological order");
@@ -175,6 +183,7 @@ pub fn generate_router(
     routes: &[RouteInfo],
     layers: &[LayerInfo],
     has_async_bean: bool,
+    has_server_config: bool,
 ) -> TokenStream {
     let wrappers: Vec<_> = routes.iter().map(generate_wrapper).collect();
 
@@ -209,7 +218,35 @@ pub fn generate_router(
         quote! { Container::build() }
     };
 
+    // Server config comes from a `#[bean] fn ... -> Arc<ServerConfig>` when the
+    // user provides one (exposed on the container as `server_config`), otherwise
+    // we fall back to `ServerConfig::default()` (`PORT` env / 8080 on 0.0.0.0).
+    let config_binding = if has_server_config {
+        quote! { let config = ::std::sync::Arc::clone(&container.server_config); }
+    } else {
+        quote! { let config = ::std::sync::Arc::new(ServerConfig::default()); }
+    };
+
     quote! {
+        /// Server bind configuration. Override by declaring a thrust `#[bean]`
+        /// that returns `::std::sync::Arc<ServerConfig>`; otherwise `Default`
+        /// is used (`PORT` env var or 8080, bound on `0.0.0.0`).
+        #[derive(Clone, Debug)]
+        pub struct ServerConfig {
+            pub host: ::std::string::String,
+            pub port: u16,
+        }
+
+        impl ::std::default::Default for ServerConfig {
+            fn default() -> Self {
+                let port: u16 = ::std::env::var("PORT")
+                    .ok()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(8080u16);
+                ServerConfig { host: ::std::string::String::from("0.0.0.0"), port }
+            }
+        }
+
         #(#wrappers)*
 
         pub fn build_router(container: ::std::sync::Arc<Container>) -> ::axum::Router {
@@ -221,15 +258,13 @@ pub fn generate_router(
 
         pub async fn run() {
             let container = ::std::sync::Arc::new(#build_call);
-            let port: u16 = ::std::env::var("PORT")
-                .ok()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(8080u16);
-            let addr = ::std::format!("0.0.0.0:{}", port);
+            #config_binding
+            let addr = ::std::format!("{}:{}", config.host, config.port);
             let router = build_router(::std::sync::Arc::clone(&container));
             let listener = ::tokio::net::TcpListener::bind(&addr)
                 .await
                 .expect("thrust: failed to bind server address");
+            println!("thrust: listening on http://{}", addr);
             ::axum::serve(listener, router)
                 .await
                 .expect("thrust: server error");

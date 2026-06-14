@@ -7,6 +7,8 @@ pub struct BeanInfo {
     pub name: String,
     pub fn_name: String,
     pub is_async: bool,
+    pub returns_arc: bool, // true if the factory already returns `Arc<T>`; if
+    // false (bare `T`) thrust wraps the result in `Arc::new`
     pub deps: Vec<String>, // dep type names (unwrapped Arc<T> from params)
     pub module_path: String,
 }

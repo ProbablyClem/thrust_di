@@ -107,11 +107,14 @@ fn collect_bean(f: &syn::ItemFn, module_path: &str, beans: &mut Vec<BeanInfo>) -
     let fn_name = f.sig.ident.to_string();
     let is_async = f.sig.asyncness.is_some();
 
-    let name = match &f.sig.output {
-        ReturnType::Type(_, ty) => try_unwrap_arc(ty),
-        ReturnType::Default => None,
-    }
-    .unwrap_or_else(|| panic!("thrust: `#[bean]` function `{fn_name}` must return `Arc<T>`"));
+    // Beans may return a bare `T` (thrust wraps it in `Arc::new`) or an explicit
+    // `Arc<T>`; either way the registered name is the inner type `T`.
+    let (name, returns_arc) = match &f.sig.output {
+        ReturnType::Type(_, ty) => (unwrap_arc(ty), try_unwrap_arc(ty).is_some()),
+        ReturnType::Default => {
+            panic!("thrust: `#[bean]` function `{fn_name}` must return a value")
+        }
+    };
 
     let deps = f
         .sig
@@ -130,6 +133,7 @@ fn collect_bean(f: &syn::ItemFn, module_path: &str, beans: &mut Vec<BeanInfo>) -
         name,
         fn_name,
         is_async,
+        returns_arc,
         deps,
         module_path: module_path.to_owned(),
     });

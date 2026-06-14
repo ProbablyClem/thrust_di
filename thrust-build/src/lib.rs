@@ -40,6 +40,7 @@ pub fn scan_and_generate(src_dir: &Path, out_dir: &Path) {
         beans.iter().map(|b| (b.name.as_str(), b)).collect();
 
     let has_async_bean = beans.iter().any(|b| b.is_async);
+    let has_server_config = beans.iter().any(|b| b.name == "ServerConfig");
 
     let metadata = codegen::generate_metadata(&components);
     let graph = codegen::generate_graph(&order, &adjacency);
@@ -62,7 +63,8 @@ pub fn scan_and_generate(src_dir: &Path, out_dir: &Path) {
     }
 
     if !routes.is_empty() {
-        let router_ts = codegen::generate_router(&routes, &layers, has_async_bean);
+        let router_ts =
+            codegen::generate_router(&routes, &layers, has_async_bean, has_server_config);
         fs::write(out_dir.join("router.rs"), router_ts.to_string()).unwrap();
         generated.push_str("include!(concat!(env!(\"OUT_DIR\"), \"/router.rs\"));\n");
     }
