@@ -2,13 +2,13 @@
 
 A Spring-Boot-like build-time code generator for Rust/Axum backends.
 
-Developers write annotated Rust structs. A build step scans the source, extracts metadata, and generates ordinary Rust code — wiring, containers, routers — before `cargo` compiles anything. The full Rust toolchain (rust-analyzer, clippy, cargo check) works on the source unchanged.
+Developers write annotated Rust structs and functions. A build step scans the source, extracts metadata, and generates ordinary Rust code — dependency wiring, a DI container, the Axum router, server startup — before `cargo` compiles anything. The full Rust toolchain (rust-analyzer, clippy, cargo check) works on the source unchanged.
 
 ---
 
 ## Why
 
-Rust backend development requires substantial boilerplate: manual `Arc` wiring, `AppState` construction, router registration, constructor chaining. Existing DI frameworks often fight the borrow checker directly. Thrust sidesteps this by treating ownership as an implementation detail hidden behind generated code.
+Rust backend development requires substantial boilerplate: manual `Arc` wiring, `AppState` construction, router registration, constructor chaining. Existing DI frameworks often fight the borrow checker directly. Thrust sidesteps this by treating ownership as an implementation detail hidden behind generated code — you declare *what* depends on *what*, and the generated container does the wiring.
 
 ---
 
@@ -25,16 +25,16 @@ Three approaches were considered:
 ```
 Annotated Rust source
         ↓
-   build.rs (syn + quote)
+   build.rs → thrust_build::scan_and_generate (syn + quote)
         ↓
-  OUT_DIR/generated.rs
+   OUT_DIR/generated.rs  (container, router, aliases, metadata)
         ↓
-   cargo build
+   thrust_macros::init!()  includes the generated code
         ↓
-  Final binary
+   cargo build → final binary
 ```
 
-Source files remain valid Rust at all times. rust-analyzer sees the real structs, not generated proxies.
+Source files remain valid Rust at all times. rust-analyzer sees the real structs, not generated proxies. The proc-macro attributes (`#[service]`, `#[get]`, `#[bean]`, …) are near pass-through markers; the actual project-wide analysis happens in `build.rs` via `syn`, not at macro-expansion time.
 
 ---
 
@@ -42,80 +42,175 @@ Source files remain valid Rust at all times. rust-analyzer sees the real structs
 
 ```
 thrust/
-├── Cargo.toml              # workspace manifest
-├── thrust-macros/          # proc-macro crate (no-op attribute stubs)
-│   └── src/lib.rs          # #[service] — passes the item through unchanged
-└── thrust-core/            # example app + scanner
-    ├── Cargo.toml          # deps: thrust-macros; build-deps: syn, quote, walkdir
-    ├── build.rs            # scans src/, generates OUT_DIR/generated.rs
-    └── src/
-        ├── main.rs         # include!(generated.rs), prints GENERATED_COMPONENTS
-        └── services.rs     # example annotated structs
+├── Cargo.toml          # workspace manifest
+├── thrust-macros/      # proc-macro crate — attribute markers + init!()
+├── thrust-build/       # the scanner + code generator (a build-dependency)
+│   └── src/
+│       ├── lib.rs      # scan_and_generate orchestrator
+│       ├── scanner.rs  # syn AST walkers (services, beans, layers, routes, impls)
+│       ├── graph.rs    # dep graph, validation, cycle detection, topo sort, trait resolution
+│       ├── codegen.rs  # container / router / run() / alias generation
+│       ├── models.rs   # ComponentInfo, BeanInfo, RouteInfo, …
+│       └── utils.rs    # Arc unwrapping, naming, module-path derivation
+├── thrust-core/        # internal app used to exercise the scanner
+└── examples/
+    ├── basic/          # DI container only, no web server
+    ├── basic-axum/     # services, trait DI, routes, config bean
+    ├── config-bean/    # #[bean] + #[layer] (Arc<T> bean form)
+    └── inspect/        # prints the generated component/dependency graph
 ```
 
-`thrust-macros` exists so that `#[service]` is a valid registered proc-macro attribute. Without it, `rustc` would reject the unknown attribute. The macro body is a pass-through — it returns the item unchanged. Actual metadata extraction happens in `build.rs` via `syn`, not at proc-macro expansion time.
+Each consumer crate has a three-line `build.rs`:
+
+```rust
+fn main() {
+    let src = std::path::Path::new("src");
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    thrust_build::scan_and_generate(src, &out);
+}
+```
+
+…lists `thrust-build` under `[build-dependencies]` and `thrust-macros` under `[dependencies]`, and calls `thrust_macros::init!()` once at the crate root.
 
 ---
 
-## How It Works
+## Features
 
-1. Developer writes an annotated struct:
+### Services & dependency injection
 
-   ```rust
-   use thrust_macros::service;
+Annotate a struct with `#[service]` and declare dependencies as fields. Thrust builds the dependency graph, validates it (missing deps and cycles are build errors), topologically sorts it, and generates a `Container` that constructs everything in order.
 
-   #[service]
-   pub struct UserService;
-   ```
+```rust
+use thrust_macros::service;
 
-2. `cargo build` triggers `build.rs` before compiling application code.
+#[service]
+pub struct GreetingService;
 
-3. `build.rs` walks every `.rs` file under `src/` with `walkdir`, parses each with `syn::parse_file`, and collects the names of all structs that carry a `#[service]` attribute.
+#[service]
+pub struct UserService {
+    pub greeting: Arc<GreetingService>,   // injected automatically
+}
+```
 
-4. `quote!` renders the collected names into a Rust constant and writes it to `$OUT_DIR/generated.rs`:
+`Arc` is the wiring currency: the container stores every component as `Arc<T>` and clones the handle into each dependent.
 
-   ```rust
-   pub const GENERATED_COMPONENTS: &[&str] = &["UserService", "EmailService"];
-   ```
+### Dependency inversion with static dispatch
 
-5. `main.rs` includes the generated file at compile time:
+Depend on a trait, not a concrete type. Write the field as a **bare `dyn Trait`** and thrust resolves it to the single `#[service]` that implements the trait, at build time — compiling it to `Arc<ConcreteImpl>` with **no trait object, no vtable**:
 
-   ```rust
-   include!(concat!(env!("OUT_DIR"), "/generated.rs"));
-   ```
+```rust
+pub trait TodoRepository {
+    fn all(&self) -> Vec<&'static str>;
+}
 
-6. The compiled binary prints the discovered components.
+#[service]
+pub struct InMemoryTodoRepository;
+impl TodoRepository for InMemoryTodoRepository { /* … */ }
+
+#[service]
+pub struct TodoService {
+    pub repo: dyn TodoRepository,   // → resolved to Arc<InMemoryTodoRepository>
+}
+```
+
+(More than one impl of the trait is an ambiguity error.) If you prefer dynamic dispatch, write the field as an explicit `Arc<dyn TodoRepository + Send + Sync>` — thrust leaves that form untouched.
+
+### Routes & handler injection
+
+Annotate `async fn` handlers with `#[get("/path")]`, `#[post]`, `#[put]`, `#[delete]`, `#[patch]`. Declare the services a handler needs as `Arc<T>` parameters — thrust generates wrappers that pull them from the container and a `build_router(Arc<Container>) -> axum::Router`:
+
+```rust
+#[get("/todos")]
+pub async fn list_todos(svc: Arc<TodoService>) -> impl IntoResponse {
+    Json(json!({ "todos": svc.find_all() }))
+}
+```
+
+### Beans (factory components)
+
+For components that need custom construction (pools, clients, config), use a `#[bean]` factory function. Its parameters are injected like any other dependency. **Return a bare `T` and thrust wraps it in `Arc` for you** (an explicit `Arc<T>` return also works):
+
+```rust
+#[bean]
+pub fn db_pool() -> DbPool {
+    DbPool::connect("postgres://localhost/app")
+}
+```
+
+`async fn` beans are awaited during container construction (`Container::build()` becomes `async` automatically).
+
+### Layers
+
+Apply Tower/Axum middleware with `#[layer]`. The function returns a layer and thrust appends it to the generated router:
+
+```rust
+#[layer]
+pub fn request_tracing() -> TraceLayer<SharedClassifier<ServerErrorsAsFailures>> {
+    TraceLayer::new_for_http()
+}
+```
+
+### Server startup & configuration
+
+When routes exist, thrust generates a `run()` that builds the container, binds, and serves. Configure the bind address **in code** by declaring a `#[bean]` that returns `ServerConfig` — thrust generates the `ServerConfig` type for you (`Default` = `0.0.0.0`, `PORT` env var or `8080`):
+
+```rust
+use crate::ServerConfig;
+
+#[bean]
+pub fn server_config() -> ServerConfig {
+    ServerConfig { port: 3000, ..Default::default() }
+}
+```
+
+```rust
+// main.rs — that's the whole entrypoint
+#[tokio::main]
+async fn main() {
+    run().await;
+}
+```
+
+Without a `server_config` bean, `run()` falls back to `ServerConfig::default()`.
 
 ---
 
 ## Quick Start
 
 ```bash
-cargo build
-cargo run -p thrust-core
-# ["UserService", "EmailService"]
+cargo run -p basic-axum
+# thrust: listening on http://0.0.0.0:3000
+
+curl localhost:3000/todos
+# {"todos":["buy milk","write tests"]}
+```
+
+Inspect the generated dependency graph for an example:
+
+```bash
+cargo run -p inspect
 ```
 
 ---
 
-## Roadmap
+## Status
 
-| Phase | Status  | Description                                                        |
-| ----- | ------- | ------------------------------------------------------------------ |
-| 1     | ✓ done  | Component discovery — scan `#[service]` structs, emit names        |
-| 2     | done    | Dependency extraction — parse struct fields to find injected types |
-| 3     | done    | Dependency graph construction                                      |
-| 4     | done    | Missing dependency validation                                      |
-| 5     | done    | Cycle detection                                                    |
-| 6     | done    | Topological ordering                                               |
-| 7     | planned | Generate container struct                                          |
-| 8     | planned | Generate constructor / build logic                                 |
-| 9     | planned | Compile generated container (end-to-end DI working)                |
-| later | —       | Route discovery, router generation, controller adapters            |
-| later | —       | Configuration binding (`#[configuration]`, `#[property]`)          |
-| later | —       | Bean factories (`#[bean] async fn`)                                |
-| later | —       | Test container with mock substitution                              |
-| later | —       | `#[transactional]`, `#[scheduled]`, `#[retry]` via code gen        |
+The core pipeline is implemented end to end:
+
+| Area                         | Status | Notes                                                              |
+| ---------------------------- | ------ | ------------------------------------------------------------------ |
+| Component discovery          | ✓      | `#[service]` structs                                               |
+| Dependency extraction        | ✓      | struct fields, bean params, route params                          |
+| Graph build / validation     | ✓      | missing-dep and cycle detection are build errors                  |
+| Topological ordering         | ✓      | unified order across services and beans                          |
+| Container + `build()`        | ✓      | sync or `async` depending on beans                               |
+| Trait DI                     | ✓      | static dispatch via build-time aliases, or explicit `Arc<dyn _>`  |
+| Axum routes + router         | ✓      | handler injection, `build_router`                                |
+| Beans / layers               | ✓      | `#[bean]` (bare `T` or `Arc<T>`), `#[layer]`                      |
+| Server `run()` + config bean | ✓      | `ServerConfig` overridable in code                               |
+| Property/config binding      | —      | planned                                                           |
+| Test container / mocks       | —      | planned                                                           |
+| `#[transactional]`, `#[scheduled]`, `#[retry]` | — | planned                                              |
 
 ---
 
