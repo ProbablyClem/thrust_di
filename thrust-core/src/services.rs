@@ -1,9 +1,9 @@
-use thrust_macros::{interface, service};
+use thrust_macros::service;
 
 /// Abstraction the services depend on, rather than a concrete repository.
-/// `#[interface]` adds the `Send + Sync` bounds required to store the
-/// implementation as `Arc<dyn UserRepository>` in the shared container.
-#[interface]
+/// A bare `dyn UserRepository` field on a `#[service]` is resolved to the
+/// concrete impl at build time and compiled as `Arc<PostgresUserRepository>`
+/// (static dispatch), so the trait needs no `Send + Sync` bound.
 pub trait UserRepository {
     fn find_user(&self) -> String;
 }

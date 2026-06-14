@@ -10,7 +10,8 @@ pub fn scan_and_generate(src_dir: &Path, out_dir: &Path) {
     let (mut components, mut beans, layers, mut raw_routes, trait_impls) =
         scanner::scan_source(src_dir);
 
-    graph::resolve_trait_deps(&trait_impls, &mut components, &mut beans, &mut raw_routes);
+    let trait_aliases =
+        graph::resolve_trait_deps(&trait_impls, &mut components, &mut beans, &mut raw_routes);
 
     let known: std::collections::HashSet<&str> = components
         .iter()
@@ -53,6 +54,12 @@ pub fn scan_and_generate(src_dir: &Path, out_dir: &Path) {
         "include!(concat!(env!(\"OUT_DIR\"), \"/graph.rs\"));\n",
         "include!(concat!(env!(\"OUT_DIR\"), \"/container.rs\"));\n",
     ));
+
+    if !trait_aliases.is_empty() {
+        let aliases = codegen::generate_impl_aliases(&trait_aliases);
+        fs::write(out_dir.join("aliases.rs"), aliases.to_string()).unwrap();
+        generated.push_str("include!(concat!(env!(\"OUT_DIR\"), \"/aliases.rs\"));\n");
+    }
 
     if !routes.is_empty() {
         let router_ts = codegen::generate_router(&routes, &layers, has_async_bean);

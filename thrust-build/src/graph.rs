@@ -2,18 +2,24 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::models::{BeanInfo, ComponentInfo, RawRouteInfo, RouteInfo, TraitImpl};
 
-/// Rewrite trait-typed dependencies (`Arc<dyn Trait>`, recorded under the bare
-/// trait name) to the concrete component that implements the trait. This lets
-/// services depend on an abstraction while the container still instantiates a
-/// concrete type; the generated `Arc<Concrete>` coerces to `Arc<dyn Trait>` at
-/// the field/parameter site. A trait with more than one implementing component
-/// is ambiguous and aborts the build.
+/// Rewrite trait-typed dependencies (recorded under the bare trait name) to the
+/// concrete component that implements the trait. This lets services depend on an
+/// abstraction while the container instantiates a concrete type. A trait with
+/// more than one implementing component is ambiguous and aborts the build.
+///
+/// Returns the de-duplicated `(trait_name, concrete)` pairs resolved for
+/// **service struct fields**. Only struct fields can use the bare-`dyn` form
+/// that the `#[service]` macro rewrites to `Arc<crate::__ThrustImpl_<Trait>>`,
+/// so these pairs drive the generated type aliases (`codegen::generate_impl_aliases`).
+/// Bean/route params are still resolved (for container wiring) but only ever use
+/// the explicit `Arc<dyn Trait>` form, which stays a trait object — so they are
+/// not collected.
 pub fn resolve_trait_deps(
     trait_impls: &[TraitImpl],
     components: &mut [ComponentInfo],
     beans: &mut [BeanInfo],
     raw_routes: &mut [RawRouteInfo],
-) {
+) -> Vec<(String, String)> {
     let mut impls: HashMap<&str, Vec<&str>> = HashMap::new();
     for ti in trait_impls {
         impls
@@ -34,9 +40,14 @@ pub fn resolve_trait_deps(
         Some(concretes[0].to_string())
     };
 
+    let mut used: Vec<(String, String)> = Vec::new();
     for c in components.iter_mut() {
         for (_, ty) in c.deps.iter_mut() {
             if let Some(concrete) = resolve(ty) {
+                let pair = (ty.clone(), concrete.clone());
+                if !used.contains(&pair) {
+                    used.push(pair);
+                }
                 *ty = concrete;
             }
         }
@@ -55,6 +66,7 @@ pub fn resolve_trait_deps(
             }
         }
     }
+    used
 }
 
 pub fn build_adjacency<'a>(

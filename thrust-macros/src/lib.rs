@@ -1,8 +1,6 @@
 use proc_macro::TokenStream;
-use quote::quote;
-use syn::{
-    parse_macro_input, parse_quote, Fields, ItemStruct, ItemTrait, Type, TypeParamBound,
-};
+use quote::{format_ident, quote};
+use syn::{parse_macro_input, parse_quote, Fields, ItemStruct, Type, TypeParamBound};
 
 fn no_op_attr(item: TokenStream) -> TokenStream {
     let allow: TokenStream = "#[allow(dead_code)]".parse().unwrap();
@@ -12,19 +10,24 @@ fn no_op_attr(item: TokenStream) -> TokenStream {
 }
 
 /// Marks a struct as an injectable component. Beyond the historical
-/// `#[allow(dead_code)]`, this rewrites any field written as a bare trait object
-/// (`dyn Trait`) into `Arc<dyn Trait>`, so dependencies can be declared without
-/// the `Arc` boilerplate. Fields already wrapped in `Arc<...>` (or any other
-/// type) are left untouched.
+/// `#[allow(dead_code)]`, this rewrites a field written as a bare trait object
+/// (`dyn Trait`) into `Arc<crate::__ThrustImpl_<Trait>>` — a build-time type
+/// alias for the concrete `#[service]` that implements the trait. That gives the
+/// dependency static dispatch (no vtable) while keeping the dependency-inversion
+/// ergonomics in source. Fields written as explicit `Arc<dyn Trait>` keep the
+/// trait object (dynamic dispatch); concrete `Arc<T>` and other fields are left
+/// untouched.
 #[proc_macro_attribute]
 pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut item_struct = parse_macro_input!(item as ItemStruct);
 
     if let Fields::Named(named) = &mut item_struct.fields {
         for field in named.named.iter_mut() {
-            if let Type::TraitObject(_) = &field.ty {
-                let obj = &field.ty;
-                field.ty = parse_quote!(::std::sync::Arc<#obj>);
+            if let Type::TraitObject(obj) = &field.ty {
+                if let Some(trait_ident) = first_trait_ident(obj) {
+                    let alias = format_ident!("__ThrustImpl_{}", trait_ident);
+                    field.ty = parse_quote!(::std::sync::Arc<crate::#alias>);
+                }
             }
         }
     }
@@ -36,32 +39,13 @@ pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
     .into()
 }
 
-/// Marks a trait as an injectable abstraction. Adds `Send + Sync` supertrait
-/// bounds (if not already present) so the trait can be stored as
-/// `Arc<dyn Trait>` inside the thread-shared container.
-#[proc_macro_attribute]
-pub fn interface(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let mut item_trait = parse_macro_input!(item as ItemTrait);
-
-    let has_bound = |name: &str| {
-        item_trait.supertraits.iter().any(|b| match b {
-            TypeParamBound::Trait(tb) => tb.path.is_ident(name),
-            _ => false,
-        })
-    };
-    let (needs_send, needs_sync) = (!has_bound("Send"), !has_bound("Sync"));
-    if needs_send {
-        item_trait.supertraits.push(parse_quote!(Send));
-    }
-    if needs_sync {
-        item_trait.supertraits.push(parse_quote!(Sync));
-    }
-
-    quote! {
-        #[allow(dead_code)]
-        #item_trait
-    }
-    .into()
+/// Last path segment of the first trait bound in a trait object, e.g.
+/// `dyn UserRepository + Send` -> `UserRepository`.
+fn first_trait_ident(obj: &syn::TypeTraitObject) -> Option<proc_macro2::Ident> {
+    obj.bounds.iter().find_map(|b| match b {
+        TypeParamBound::Trait(tb) => tb.path.segments.last().map(|s| s.ident.clone()),
+        _ => None,
+    })
 }
 
 #[proc_macro_attribute]
