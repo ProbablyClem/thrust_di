@@ -1,1 +1,0 @@
-pub struct Container { pub db_pool : :: std :: sync :: Arc < DbPool > , pub user_service : :: std :: sync :: Arc < UserService > } impl Container { pub fn build () -> Self { let db_pool = crate :: config :: db_pool () ; let user_service = :: std :: sync :: Arc :: new (UserService { pool : db_pool . clone () }) ; Self { db_pool , user_service } } }
